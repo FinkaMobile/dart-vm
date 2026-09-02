@@ -4,6 +4,97 @@
 Dart / Flutter App 的信息。当前提供运行会话发现、网络采集、运行时对象检查、Flutter
 UI Inspector 和通用 VM Service extension 调用能力；它不会发起、重放或修改业务请求。
 
+## 它解决什么问题
+
+Dart VM Service 提供的是底层 RPC。直接检查一个嵌套对象字段时，调用方需要自行定位
+isolate、搜索 class、枚举实例、追踪每一级临时 object ID，并从体积很大的协议响应中提取
+目标值。这个过程对人工操作繁琐，也很容易把大量无关数据送进 Agent 或模型上下文。
+
+`dart-vm` 把这些协议步骤封装成稳定、只读的命令，并只输出完成诊断所需的结构化结果。
+
+### 一个字段查询：1 条命令与 8 次 RPC
+
+假设要读取唯一 `SessionManager` 实例的
+`_client._connectionState._name` 字段。
+
+使用 `dart-vm`：
+
+```bash
+dart-vm object get --class SessionManager --path '_client._connectionState._name'
+```
+
+```text
+object get
+  选择 main isolate
+  查找 SessionManager class
+  确认唯一实例
+  _client
+    _connectionState
+      _name → "connected"
+```
+
+CLI 返回保留了定位信息和最终值，但不展开无关的 VM 元数据：
+
+```json
+{
+  "path": "_client._connectionState._name",
+  "result": {
+    "kind": "String",
+    "value": "connected"
+  }
+}
+```
+
+不使用 `dart-vm` 时，同一查询需要调用者手动完成：
+
+```text
+getVM
+  getIsolate
+  getClassList
+  getInstances
+  getObject(SessionManager)
+    getObject(_client)
+      getObject(_connectionState)
+        getObject(_name)
+```
+
+| 对比项 | `dart-vm` | 直接调用 VM Service |
+| --- | ---: | ---: |
+| 用户侧命令 | 1 行 | 9 行、8 次 RPC |
+| 命令长度 | 81 字符 | 1,485 字符 |
+| 命令输入 Token | 19 | 492 |
+| 需要手动追踪的 ID | 0 | 6 个 |
+| 最终结构化响应 | 629 字节、204 Token | 最后一次原始响应 706 字节、220 Token |
+| 完整原始响应未过滤时 | CLI 内部整形，不进入上下文 | 11,810,816 字节、3,510,730 Token |
+| 得到的目标值 | `"connected"` | `"connected"` |
+
+在这次样本中，命令输入减少约 96%。如果调试工具或 Agent 原样接收每一次 RPC 响应，
+CLI 进入终端或模型上下文的响应 Token 减少约 99.994%，约为原始响应的 1/17,209。
+统计来自一次真实 Flutter Debug 进程中的同结构四层字段查询，示例标识符已通用化；
+Token 使用 `o200k_base` 编码计算。应用规模、已加载 class 数量和对象结构不同，实际数字
+也会变化。
+
+`dart-vm` 内部仍然调用相同的 VM Service RPC，因此它主要降低的是操作复杂度、出错概率
+和上下文消耗，而不是 VM 侧的查询工作量。手写 `jq` 过滤也能减少最终输出，但需要自行
+维护下面这段查找与 ID 串联逻辑。
+
+<details>
+<summary>查看等价的原始 VM Service 命令</summary>
+
+```bash
+VM_URI='http://127.0.0.1:<port>/<token>/'
+ISOLATE_ID=$(curl -fsS "${VM_URI}getVM" | jq -r '.result.isolates[] | select(.name == "main") | .id' | head -1)
+curl -fsS --get "${VM_URI}getIsolate" --data-urlencode "isolateId=$ISOLATE_ID" >/dev/null
+CLASS_ID=$(curl -fsS --get "${VM_URI}getClassList" --data-urlencode "isolateId=$ISOLATE_ID" | jq -r '.result.classes[] | select(.name == "SessionManager") | .id' | head -1)
+ROOT_ID=$(curl -fsS --get "${VM_URI}getInstances" --data-urlencode "isolateId=$ISOLATE_ID" --data-urlencode "objectId=$CLASS_ID" --data-urlencode 'limit=2' | jq -r '.result.instances[0].id')
+CLIENT_ID=$(curl -fsS --get "${VM_URI}getObject" --data-urlencode "isolateId=$ISOLATE_ID" --data-urlencode "objectId=$ROOT_ID" --data-urlencode 'count=100' | jq -r '.result.fields[] | select((.name // .decl.name) == "_client") | .value.id')
+STATE_ID=$(curl -fsS --get "${VM_URI}getObject" --data-urlencode "isolateId=$ISOLATE_ID" --data-urlencode "objectId=$CLIENT_ID" --data-urlencode 'count=100' | jq -r '.result.fields[] | select((.name // .decl.name) == "_connectionState") | .value.id')
+NAME_ID=$(curl -fsS --get "${VM_URI}getObject" --data-urlencode "isolateId=$ISOLATE_ID" --data-urlencode "objectId=$STATE_ID" --data-urlencode 'count=100' | jq -r '.result.fields[] | select((.name // .decl.name) == "_name") | .value.id')
+curl -fsS --get "${VM_URI}getObject" --data-urlencode "isolateId=$ISOLATE_ID" --data-urlencode "objectId=$NAME_ID" | jq -r '.result.valueAsString'
+```
+
+</details>
+
 ## 安装
 
 ### macOS / Linux
