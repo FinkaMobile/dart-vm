@@ -1,3 +1,9 @@
+## 0.3.0 - 2026-09-02
+
+- Add loaded-class search and live-instance listing through `dart-vm object`.
+- Add shallow object inspection with stored-field, List, Map, and Record paths.
+- Add actionable diagnostics for missing classes, ambiguous classes, multiple instances, invalid paths, and expired object IDs.
+
 ## 0.2.2 - 2026-08-18
 
 - Fix the Windows installer release smoke test fixture.

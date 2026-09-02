@@ -1,7 +1,7 @@
 name: dart_vm
-description: A sample command-line application with basic argument parsing.
-version: 0.2.2
-# repository: https://github.com/my_org/my_repo
+description: Inspect network activity, runtime objects, and Flutter UI data through the Dart VM Service.
+version: 0.3.0
+repository: https://github.com/kuopenx/dart-vm
 
 environment:
   sdk: ^3.11.5

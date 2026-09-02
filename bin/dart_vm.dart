@@ -3,8 +3,9 @@ import 'dart:io';
 
 import 'package:args/command_runner.dart';
 import 'package:dart_vm/dart_vm.dart';
+import 'package:vm_service/vm_service.dart' show ClassRef, ObjRef;
 
-const version = '0.2.2';
+const version = '0.3.0';
 
 void _writeJson(Object? value) {
   stdout.writeln(const JsonEncoder.withIndent('  ').convert(value));
@@ -14,7 +15,7 @@ Future<void> main(List<String> arguments) async {
   final runner =
       CommandRunner<void>(
           'dart-vm',
-          'Inspect Dart VM Service network and Flutter Inspector data.',
+          'Inspect Dart VM Service network, runtime objects, and Flutter UI data.',
         )
         ..argParser.addOption(
           'uri',
@@ -31,6 +32,7 @@ Future<void> main(List<String> arguments) async {
         )
         ..addCommand(NetworkCommand())
         ..addCommand(ExtensionCommand())
+        ..addCommand(ObjectCommand())
         ..addCommand(ConfigCommand())
         ..addCommand(ServiceCommand())
         ..addCommand(UpgradeCommand())
@@ -122,6 +124,28 @@ abstract class VmCommand extends Command<void> {
       final client = await ServiceExtensionClient.connect(
         targetUri,
         extension: extension,
+        isolate: isolate,
+      );
+      try {
+        return await action(client);
+      } finally {
+        await client.dispose();
+      }
+    } on SocketException catch (_) {
+      throw staleUriError();
+    } on WebSocketException catch (_) {
+      throw staleUriError();
+    }
+  }
+
+  Future<T> withObjectInspector<T>(
+    String? isolate,
+    Future<T> Function(ObjectInspectorClient client) action,
+  ) async {
+    final targetUri = await resolveUri();
+    try {
+      final client = await ObjectInspectorClient.connect(
+        targetUri,
         isolate: isolate,
       );
       try {
@@ -293,6 +317,308 @@ class ExtensionCallCommand extends VmCommand {
       printJson({
         'isolateId': client.isolateId,
         'result': await client.call(extension, parameters),
+      });
+    });
+  }
+}
+
+class ObjectCommand extends Command<void> {
+  ObjectCommand() {
+    addSubcommand(ObjectClassesCommand());
+    addSubcommand(ObjectInstancesCommand());
+    addSubcommand(ObjectGetCommand());
+  }
+
+  @override
+  final name = 'object';
+
+  @override
+  final description =
+      'Find loaded Dart classes and inspect live objects without evaluating code.';
+
+  @override
+  String get usageFooter => '''
+Object inspection is read-only and defaults to the main isolate. Object IDs are
+temporary VM handles and can expire after GC, Hot Restart, or App restart.
+
+Examples:
+  dart-vm object classes --name CacheManager
+  dart-vm object instances --class CacheManager
+  dart-vm object get --class CacheManager --path '_client._status._name'
+''';
+
+  @override
+  Future<void> run() =>
+      throw UsageException('Choose an object subcommand.', usage);
+}
+
+abstract class ObjectVmCommand extends VmCommand {
+  void addIsolateOption() {
+    argParser.addOption(
+      'isolate',
+      valueHelp: 'isolate',
+      help:
+          'Isolate name or ID. Defaults to main, then the first non-system isolate.',
+    );
+  }
+
+  void addLibraryOption() {
+    argParser.addOption(
+      'library',
+      valueHelp: 'uri-fragment',
+      help:
+          'Case-sensitive library URI fragment used to disambiguate equal class names.',
+    );
+  }
+
+  String? get isolate => argResults!['isolate'] as String?;
+
+  String? get library {
+    final value = argResults!['library'] as String?;
+    return value == null || value.isEmpty ? null : value;
+  }
+
+  int positiveIntOption(String name) {
+    final raw = argResults![name] as String;
+    final value = int.tryParse(raw);
+    if (value == null || value <= 0) {
+      throw UsageException('--$name must be a positive integer.', usage);
+    }
+    return value;
+  }
+}
+
+class ObjectClassesCommand extends ObjectVmCommand {
+  ObjectClassesCommand() {
+    argParser.addOption(
+      'name',
+      valueHelp: 'text',
+      help:
+          'Case-sensitive class name fragment. Returns every loaded class containing it.',
+      mandatory: true,
+    );
+    addLibraryOption();
+    addIsolateOption();
+  }
+
+  @override
+  final name = 'classes';
+
+  @override
+  final description =
+      'Search loaded classes by name and report their class IDs and libraries.';
+
+  @override
+  String get usageFooter => '''
+This command searches classes already loaded in the selected isolate. An empty
+result can mean the feature has not been initialized yet or the name differs.
+
+Examples:
+  dart-vm object classes --name CacheManager
+  dart-vm object classes --name Manager --library package:example/
+  dart-vm object classes --name Manager --isolate main
+''';
+
+  @override
+  Future<void> run() async {
+    final query = argResults!['name'] as String;
+    if (query.isEmpty) {
+      throw UsageException('--name must not be empty.', usage);
+    }
+    await withObjectInspector(isolate, (client) async {
+      final classes = await client.findClasses(name: query, library: library);
+      printJson({
+        'isolate': {'id': client.isolateId, 'name': client.isolateName},
+        'query': {'name': query, if (library != null) 'library': library},
+        'count': classes.length,
+        'classes': classes.map(describeClass).toList(),
+      });
+    });
+  }
+}
+
+class ObjectInstancesCommand extends ObjectVmCommand {
+  ObjectInstancesCommand() {
+    argParser
+      ..addOption(
+        'class',
+        valueHelp: 'class-name',
+        help: 'Exact, case-sensitive class name.',
+        mandatory: true,
+      )
+      ..addOption(
+        'limit',
+        valueHelp: 'count',
+        help:
+            'Maximum number of instance references to return. totalCount still reports all instances.',
+        defaultsTo: '20',
+      )
+      ..addFlag(
+        'include-subclasses',
+        negatable: false,
+        help: 'Include instances of subclasses.',
+      )
+      ..addFlag(
+        'include-implementers',
+        negatable: false,
+        help: 'Include interface implementers. This also includes subclasses.',
+      );
+    addLibraryOption();
+    addIsolateOption();
+  }
+
+  @override
+  final name = 'instances';
+
+  @override
+  final description =
+      'List live instances of one loaded class and return reusable object IDs.';
+
+  @override
+  String get usageFooter => '''
+VM instance order is undefined and can change between calls. Use the returned
+object ID with "object get --id" instead of relying on list position. Instances
+may include unreachable objects that have not been garbage-collected yet.
+
+Examples:
+  dart-vm object instances --class CacheManager
+  dart-vm object instances --class Controller --limit 50
+  dart-vm object instances --class Controller --library package:example/controller.dart
+''';
+
+  @override
+  Future<void> run() async {
+    final className = argResults!['class'] as String;
+    if (className.isEmpty) {
+      throw UsageException('--class must not be empty.', usage);
+    }
+    final limit = positiveIntOption('limit');
+    await withObjectInspector(isolate, (client) async {
+      final classRef = await client.requireClass(className, library: library);
+      final result = await client.instances(
+        classRef,
+        limit: limit,
+        includeSubclasses: argResults!['include-subclasses'] as bool,
+        includeImplementers: argResults!['include-implementers'] as bool,
+      );
+      final instances = result.instances ?? const [];
+      printJson({
+        'isolate': {'id': client.isolateId, 'name': client.isolateName},
+        'class': describeClass(classRef),
+        'totalCount': result.totalCount ?? 0,
+        'returnedCount': instances.length,
+        'instances': instances.map(describeReference).toList(),
+      });
+    });
+  }
+}
+
+class ObjectGetCommand extends ObjectVmCommand {
+  ObjectGetCommand() {
+    argParser
+      ..addOption(
+        'class',
+        valueHelp: 'class-name',
+        help:
+            'Exact class name. The class must have exactly one live instance.',
+      )
+      ..addOption(
+        'id',
+        valueHelp: 'object-id',
+        help:
+            'Object ID returned by object instances or another object result.',
+      )
+      ..addOption(
+        'path',
+        valueHelp: 'field-path',
+        help:
+            'Stored field or collection path, for example _client._status, items[0].id, or settings["endpoint"].',
+      )
+      ..addOption(
+        'limit',
+        valueHelp: 'count',
+        help:
+            'Maximum List, Set, or Map entries included in the final shallow result.',
+        defaultsTo: '20',
+      );
+    addLibraryOption();
+    addIsolateOption();
+  }
+
+  @override
+  final name = 'get';
+
+  @override
+  final description =
+      'Inspect an object or follow a stored-field and collection path.';
+
+  @override
+  String get usageFooter => '''
+Pass exactly one of --class or --id. A class target is selected automatically
+only when exactly one live instance exists. Paths read stored fields, List
+indexes, JSON-scalar Map keys, and positional Record fields; they never invoke
+getters, methods, or arbitrary Dart expressions. Results are shallow to avoid
+cycles and unexpectedly large output.
+
+Path examples:
+  _client._status._name
+  items[0].id
+  settings["endpoint"]
+
+Command examples:
+  dart-vm object get --class CacheManager
+  dart-vm object get --class CacheManager --path '_client._status._name'
+  dart-vm object get --id objects/123/0 --path 'items[0]'
+''';
+
+  @override
+  Future<void> run() async {
+    final className = argResults!['class'] as String?;
+    final objectId = argResults!['id'] as String?;
+    final hasClass = className != null && className.isNotEmpty;
+    final hasId = objectId != null && objectId.isNotEmpty;
+    if (hasClass == hasId) {
+      throw UsageException(
+        'Pass exactly one of --class <class-name> or --id <object-id>.',
+        usage,
+      );
+    }
+    if (library != null && !hasClass) {
+      throw UsageException('--library can only be used with --class.', usage);
+    }
+    final path = argResults!['path'] as String?;
+    if (argResults!.wasParsed('path')) {
+      try {
+        parseObjectPath(path ?? '');
+      } on FormatException catch (error) {
+        throw UsageException('Invalid --path: ${error.message}', usage);
+      }
+    }
+    final limit = positiveIntOption('limit');
+
+    await withObjectInspector(isolate, (client) async {
+      ClassRef? classRef;
+      late final ObjRef root;
+      if (hasClass) {
+        classRef = await client.requireClass(className, library: library);
+        root = await client.requireUniqueInstance(classRef);
+      } else {
+        root = ObjRef(id: objectId!);
+      }
+
+      final selected = path == null ? root : await client.readPath(root, path);
+      final result = selected is ObjRef
+          ? describeObject(
+              await client.loadValue(selected, collectionLimit: limit),
+            )
+          : describeReference(selected);
+      final target = <String, Object?>{'object': describeReference(root)};
+      if (classRef != null) target['class'] = describeClass(classRef);
+      printJson({
+        'isolate': {'id': client.isolateId, 'name': client.isolateName},
+        'target': target,
+        'path': ?path,
+        'result': result,
       });
     });
   }

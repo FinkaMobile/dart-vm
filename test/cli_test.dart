@@ -79,6 +79,53 @@ void main() {
     );
   });
 
+  test('lists runtime object inspection commands', () async {
+    final result = await Process.run(Platform.resolvedExecutable, [
+      'run',
+      'bin/dart_vm.dart',
+      'help',
+      'object',
+    ]);
+
+    expect(result.exitCode, 0);
+    expect(
+      result.stdout,
+      allOf(contains('classes'), contains('instances'), contains('get')),
+    );
+  });
+
+  test('object get requires exactly one target before connecting', () async {
+    final result = await Process.run(Platform.resolvedExecutable, [
+      'run',
+      'bin/dart_vm.dart',
+      'object',
+      'get',
+    ]);
+
+    expect(result.exitCode, 64);
+    expect(
+      result.stderr,
+      contains('Pass exactly one of --class <class-name> or --id <object-id>.'),
+    );
+  });
+
+  test('object get reports invalid paths before connecting', () async {
+    final result = await Process.run(Platform.resolvedExecutable, [
+      'run',
+      'bin/dart_vm.dart',
+      'object',
+      'get',
+      '--class=Runtime',
+      '--path=items[unquoted]',
+    ]);
+
+    expect(result.exitCode, 64);
+    expect(
+      result.stderr,
+      allOf(contains('Invalid --path'), contains('["name"]')),
+    );
+  });
+
   test('preserves commas in VM Service extension parameter values', () {
     final results = ExtensionCallCommand().argParser.parse([
       '--name=ext.example.mock',
@@ -168,6 +215,27 @@ void main() {
         '--name=<name>',
         '--isolate=<isolate>',
         '--param=<key=value>',
+      ],
+      ['object', 'classes']: [
+        '--name=<text>',
+        '--library=<uri-fragment>',
+        '--isolate=<isolate>',
+      ],
+      ['object', 'instances']: [
+        '--class=<class-name>',
+        '--limit=<count>',
+        '--include-subclasses',
+        '--include-implementers',
+        '--library=<uri-fragment>',
+        '--isolate=<isolate>',
+      ],
+      ['object', 'get']: [
+        '--class=<class-name>',
+        '--id=<object-id>',
+        '--path=<field-path>',
+        '--limit=<count>',
+        '--library=<uri-fragment>',
+        '--isolate=<isolate>',
       ],
       ['config', 'uri', 'set']: [],
       ['config', 'uri', 'show']: [],

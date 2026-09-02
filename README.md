@@ -1,8 +1,8 @@
 # dart-vm
 
 `dart-vm` 是一个本地调试命令行工具，用于通过 Dart VM Service 查看运行中
-Dart / Flutter App 的信息。当前提供运行会话发现、网络采集、Flutter UI Inspector 和
-通用 VM Service extension 调用能力；它不会发起、重放或修改业务请求。
+Dart / Flutter App 的信息。当前提供运行会话发现、网络采集、运行时对象检查、Flutter
+UI Inspector 和通用 VM Service extension 调用能力；它不会发起、重放或修改业务请求。
 
 ## 安装
 
@@ -154,6 +154,7 @@ dart-vm network off
 ```bash
 dart-vm --help
 dart-vm help network
+dart-vm help object
 ```
 
 ## Flutter UI
@@ -167,6 +168,53 @@ dart-vm ui details --id='<widget-id>'
 dart-vm ui layout --id='<widget-id>' --depth=1
 dart-vm ui screenshot --id='<widget-id>' --width=390 --height=844 --out=widget.png
 ```
+
+## 运行时对象
+
+对象命令读取所选 isolate 中已经加载的类和当前堆对象。省略 `--isolate` 时优先使用
+`main` isolate；没有 `main` 时使用第一个非系统 isolate。
+
+按名称片段搜索已加载的类：
+
+```bash
+dart-vm object classes --name='CacheManager'
+dart-vm object classes --name='Manager' --library='package:example/'
+```
+
+使用精确类名列出实例。`totalCount` 是实例总数，`--limit` 只限制返回的实例引用数量：
+
+```bash
+dart-vm object instances --class='CacheManager'
+dart-vm object instances --class='Controller' --limit=50
+```
+
+类只有一个存活实例时，可以直接读取对象或嵌套字段：
+
+```bash
+dart-vm object get --class='CacheManager'
+dart-vm object get \
+  --class='CacheManager' \
+  --path='_client._status._name'
+```
+
+类存在多个实例时，先用 `object instances` 获取对象 ID，再指定目标：
+
+```bash
+dart-vm object get --id='objects/123/0' --path='items[0].id'
+```
+
+字段路径支持存储字段、List 下标、JSON 标量 Map key 和 Record 位置字段：
+
+```text
+_client._status._name
+items[0].id
+settings["endpoint"]
+```
+
+对象检查不会调用 getter、方法或任意 Dart 表达式。默认只返回浅层对象；`object get
+--limit` 控制最终 List、Set 或 Map 最多返回多少项。VM 返回的实例顺序不稳定，不应依赖
+`object instances` 的数组位置。对象 ID 也是临时 VM 句柄，可能在 GC、Hot Restart 或 App
+重启后失效；发生失效时重新运行 `object instances` 获取当前 ID。
 
 ## 调用 VM Service extension
 
