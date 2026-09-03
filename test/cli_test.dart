@@ -88,33 +88,42 @@ void main() {
     ]);
 
     expect(result.exitCode, 0);
+    expect(result.stdout, allOf(contains('classes'), contains('find')));
     expect(
       result.stdout,
-      allOf(contains('classes'), contains('instances'), contains('get')),
+      allOf(
+        isNot(contains('\n  instances')),
+        isNot(contains('\n  get')),
+        isNot(contains('\n  fields')),
+        isNot(contains('\n  rows')),
+      ),
     );
   });
 
-  test('object get requires exactly one target before connecting', () async {
+  test(
+    'object find rejects schema combined with a filter before connecting',
+    () async {
+      final result = await Process.run(Platform.resolvedExecutable, [
+        'run',
+        'bin/dart_vm.dart',
+        'object',
+        'find',
+        '--class=Runtime',
+        '--schema',
+        '--where=enabled=true',
+      ]);
+
+      expect(result.exitCode, 64);
+      expect(result.stderr, contains('--schema cannot be combined'));
+    },
+  );
+
+  test('object find reports invalid paths before connecting', () async {
     final result = await Process.run(Platform.resolvedExecutable, [
       'run',
       'bin/dart_vm.dart',
       'object',
-      'get',
-    ]);
-
-    expect(result.exitCode, 64);
-    expect(
-      result.stderr,
-      contains('Pass exactly one of --class <class-name> or --id <object-id>.'),
-    );
-  });
-
-  test('object get reports invalid paths before connecting', () async {
-    final result = await Process.run(Platform.resolvedExecutable, [
-      'run',
-      'bin/dart_vm.dart',
-      'object',
-      'get',
+      'find',
       '--class=Runtime',
       '--path=items[unquoted]',
     ]);
@@ -124,6 +133,60 @@ void main() {
       result.stderr,
       allOf(contains('Invalid --path'), contains('["name"]')),
     );
+  });
+
+  test('parses object find filters and selected fields', () {
+    final results = ObjectFindCommand().argParser.parse([
+      '--class=Runtime',
+      '--where=_state._name=connected',
+      '--fields=_state._name,enabled',
+    ]);
+
+    expect(results['where'], ['_state._name=connected']);
+    expect(results['fields'], '_state._name,enabled');
+  });
+
+  test('uses separate object and collection limits for object find', () {
+    final defaults = ObjectFindCommand().argParser.parse(['--class=Runtime']);
+    final custom = ObjectFindCommand().argParser.parse([
+      '--class=Runtime',
+      '--match-limit=3',
+      '--row-limit=50',
+    ]);
+
+    expect(defaults['match-limit'], '1');
+    expect(defaults['row-limit'], '100');
+    expect(custom['match-limit'], '3');
+    expect(custom['row-limit'], '50');
+  });
+
+  test('object find validates selected fields before connecting', () async {
+    final result = await Process.run(Platform.resolvedExecutable, [
+      'run',
+      'bin/dart_vm.dart',
+      'object',
+      'find',
+      '--class=Runtime',
+      '--fields=items[unquoted]',
+    ]);
+
+    expect(result.exitCode, 64);
+    expect(result.stderr, contains('Invalid --fields path'));
+  });
+
+  test('object find validates a collection path before connecting', () async {
+    final result = await Process.run(Platform.resolvedExecutable, [
+      'run',
+      'bin/dart_vm.dart',
+      'object',
+      'find',
+      '--class=Runtime',
+      '--path=items[unquoted]',
+      '--fields=id',
+    ]);
+
+    expect(result.exitCode, 64);
+    expect(result.stderr, contains('Invalid --path'));
   });
 
   test('preserves commas in VM Service extension parameter values', () {
@@ -221,21 +284,19 @@ void main() {
         '--library=<uri-fragment>',
         '--isolate=<isolate>',
       ],
-      ['object', 'instances']: [
+      ['object', 'find']: [
         '--class=<class-name>',
-        '--limit=<count>',
+        '--schema',
+        '--where=<path=value>',
+        '--path=<field-path>',
+        '--fields=<path[,path...]>',
+        '--match-limit=<count>',
+        '--row-limit=<count>',
         '--include-subclasses',
         '--include-implementers',
         '--library=<uri-fragment>',
         '--isolate=<isolate>',
-      ],
-      ['object', 'get']: [
-        '--class=<class-name>',
-        '--id=<object-id>',
-        '--path=<field-path>',
-        '--limit=<count>',
-        '--library=<uri-fragment>',
-        '--isolate=<isolate>',
+        '--verbose',
       ],
       ['config', 'uri', 'set']: [],
       ['config', 'uri', 'show']: [],

@@ -1,3 +1,10 @@
+## 0.4.0 - 2026-09-03
+
+- Add `dart-vm object find` for stored-field filtering, value inspection, schema discovery, and bounded List, Set, and Map extraction.
+- Add repeatable `--where` filters, `--match-limit`, and `--row-limit` for object inspection.
+- Add adaptive collection paging that rebinds an expired temporary VM object ID and retries the same page with a smaller size.
+- Keep object references compact by default and add `--verbose` for diagnostic metadata.
+
 ## 0.3.0 - 2026-09-02
 
 - Add loaded-class search and live-instance listing through `dart-vm object`.

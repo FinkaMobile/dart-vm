@@ -1,77 +1,62 @@
-# 运行时对象检查
+# 运行时对象
 
-动态查找所选 isolate 中已加载的 Dart 类和存活对象，并读取对象的存储字段或集合成员。
-省略 `--isolate` 时优先使用 `main` isolate。
+对象检查只读存储字段，默认使用 `main` isolate。高效顺序是：先定位类，再一次 `find` 直接得到所需值；不要保存 VM object ID 或依赖实例顺序。
 
-## 查找类
-
-先按区分大小写的名称片段搜索类：
+## 1. 定位精确类
 
 ```bash
-dart-vm object classes --name="CacheManager"
+dart-vm object classes --name='RealtimeRuntime'
+dart-vm object classes --name='Runtime' --library='package:example/'
 ```
 
-同名类来自不同 library 时，使用返回的 library URI 片段缩小范围：
+结果为空时先进入对应页面；仍为空则用 `dart-vm service list` 确认连接目标。
+
+## 2. 查找并读取
+
+已知字段路径时，一条 `find` 直出目标值：
 
 ```bash
-dart-vm object classes \
-  --name="CacheManager" \
-  --library="package:example/"
+dart-vm object find \
+  --class RealtimeRuntime \
+  --fields '_bus._transportState._name'
 ```
 
-搜索结果为空时，先进入会初始化该功能的 App 页面，再重新查询。必要时运行
-`dart-vm service list`，确认当前连接的是预期进程。
-
-## 查找实例
-
-使用完整且区分大小写的类名查询实例：
+字段不确定时先看 schema：
 
 ```bash
-dart-vm object instances --class="CacheManager"
+dart-vm object find --class RealtimeRuntime --schema
 ```
 
-`totalCount` 表示实例总数，`returnedCount` 受 `--limit` 控制。VM 不保证实例顺序稳定，
-不要跨命令保存数组下标；使用返回的对象 ID 继续检查。
-
-## 读取对象
-
-类只有一个存活实例时，直接读取浅层字段：
+用 `--where path=value` 精确锁定实例；可重复传入，条件按 AND 匹配。值可为未加引号字符串或 JSON 标量：
 
 ```bash
-dart-vm object get --class="CacheManager"
+dart-vm object find \
+  --class ChatViewmodel \
+  --where '_userId=user-1' \
+  --fields 'conversationId,_isLoadingMessages'
 ```
 
-一步读取嵌套状态：
+路径只支持存储字段、List/Set 下标、JSON 标量 Map key 和 Record 位置字段，例如 `_field.child`、`items[0]`、`config["host"]`。不会执行 getter、方法或表达式。
+
+## 3. 批量读取集合
+
+`--path` 指向 List、Set 或 Map，`--fields` 选择每行字段。`--row-limit` 是严格上限；`--match-limit` 控制匹配对象数，默认 1。
 
 ```bash
-dart-vm object get \
-  --class="CacheManager" \
-  --path="_client._status._name"
+dart-vm object find \
+  --class ChatViewmodel \
+  --where '_userId=user-1' \
+  --path 'messages._value' \
+  --fields 'imMessage.messageId,imMessage.timestamp' \
+  --row-limit 20
 ```
 
-类有多个实例时，先运行 `object instances`，再使用结果里的对象 ID：
-
-```bash
-dart-vm object get \
-  --id="objects/123/0" \
-  --path="items[0].id"
-```
-
-路径支持以下只读访问：
-
-- `_field.child`：对象的存储字段，包括私有字段。
-- `items[0]`：List 下标。
-- `config["host"]`：String、数字、bool 或 null 类型的 Map key。
-- `record[0]`：Record 位置字段。
-
-命令不会执行 getter、方法或任意 Dart 表达式。最终值是集合时，使用 `--limit` 控制浅层
-结果最多包含多少项。
+集合页默认 32 条；仅临时 VM ID 过期时才重定位同一对象，并以 16、8、4 条重试同一页。普通查询无需额外操作。
 
 ## 诊断
 
-- `No loaded class`：运行 `object classes --name <名称片段>` 检查真实类名和 library URI。
-- `has no live instances`：进入相关页面或触发初始化后重试。
-- `has ... live instances`：运行 `object instances`，再通过 `object get --id` 指定实例。
-- `Field ... was not found`：去掉路径或只保留父路径，查看实际字段名。
-- `Object ... is unavailable`：对象 ID 已因 GC、Hot Restart 或 App 重启失效，重新查询实例。
-- `No isolate matches`：省略 `--isolate` 使用 main，或根据错误列出的 isolate 名称和 ID 选择。
+- 默认结果紧凑；仅在排查问题时加 `--verbose`，查看 `expiredCount`、`retryCount`、`collectedCount`。
+- `No loaded class`：用 `object classes` 核对名称和 `--library`。
+- `has no live instances`：进入目标页面或触发初始化后重试。
+- `Field ... was not found`：用 `--schema` 获取实际存储字段。
+- 临时 ID 过期会自动恢复；App 重启或连接失效时重新设置 VM Service URI。

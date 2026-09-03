@@ -20,14 +20,14 @@ isolate、搜索 class、枚举实例、追踪每一级临时 object ID，并从
 使用 `dart-vm`：
 
 ```bash
-dart-vm object get --class SessionManager --path '_client._connectionState._name'
+dart-vm object find --class SessionManager --path '_client._connectionState._name'
 ```
 
 ```text
-object get
+object find
   选择 main isolate
   查找 SessionManager class
-  确认唯一实例
+  定位可读取实例
   _client
     _connectionState
       _name → "connected"
@@ -38,10 +38,8 @@ CLI 返回保留了定位信息和最终值，但不展开无关的 VM 元数据
 ```json
 {
   "path": "_client._connectionState._name",
-  "result": {
-    "kind": "String",
-    "value": "connected"
-  }
+  "matchedCount": 1,
+  "matches": [{"value": {"kind": "String", "value": "connected"}}]
 }
 ```
 
@@ -61,7 +59,7 @@ getVM
 | 对比项 | `dart-vm` | 直接调用 VM Service |
 | --- | ---: | ---: |
 | 用户侧命令 | 1 行 | 9 行、8 次 RPC |
-| 命令长度 | 81 字符 | 1,485 字符 |
+| 命令长度 | 82 字符 | 1,485 字符 |
 | 命令输入 Token | 19 | 492 |
 | 需要手动追踪的 ID | 0 | 6 个 |
 | 最终结构化响应 | 629 字节、204 Token | 最后一次原始响应 706 字节、220 Token |
@@ -77,6 +75,38 @@ Token 使用 `o200k_base` 编码计算。应用规模、已加载 class 数量�
 `dart-vm` 内部仍然调用相同的 VM Service RPC，因此它主要降低的是操作复杂度、出错概率
 和上下文消耗，而不是 VM 侧的查询工作量。手写 `jq` 过滤也能减少最终输出，但需要自行
 维护下面这段查找与 ID 串联逻辑。
+
+同一套封装还覆盖批量读取、条件筛选和字段结构查看。批量读取会复用一个 VM Service
+连接，并把每行只保留为请求的字段，适合快速检查消息列表、缓存或状态集合：
+
+```bash
+dart-vm object find \
+  --class ChatViewModel \
+  --path 'messages' \
+  --fields 'text,imMessage.messageId,imMessage.timestamp' \
+  --row-limit 200
+```
+
+需要先定位满足条件的对象时，可以重复传入 `--where`；每个条件都是存储字段路径和标量
+值，多个条件按 AND 匹配：
+
+```bash
+dart-vm object find \
+  --class RealtimeRuntime \
+  --where '_bus._transportState._name=connected' \
+  --fields '_bus._transportState._name'
+```
+
+想了解对象有哪些可继续查询的字段，可以先查看字段结构，再决定 `object find` 的路径：
+
+```bash
+dart-vm object find --class RealtimeRuntime --schema
+```
+
+这三个命令都只读取 VM Service 的存储字段，不调用 getter、方法或任意 Dart 表达式。对象
+引用默认只保留必要摘要：标量为 `kind/value`，对象引用为 `id/kind/class`，集合补充
+`length`；需要 `identityHashCode` 和恢复计数等诊断元数据时，追加 `--verbose`。对象 ID
+仍是临时句柄；同一次集合读取中发生过期时，CLI 会重新定位目标后重试当前页。
 
 <details>
 <summary>查看等价的原始 VM Service 命令</summary>
@@ -272,26 +302,31 @@ dart-vm object classes --name='CacheManager'
 dart-vm object classes --name='Manager' --library='package:example/'
 ```
 
-使用精确类名列出实例。`totalCount` 是实例总数，`--limit` 只限制返回的实例引用数量：
+通过 `object find` 完成对象筛选、字段读取与集合提取。`--match-limit` 控制匹配对象数量，
+默认只返回一个可读取对象：
 
 ```bash
-dart-vm object instances --class='CacheManager'
-dart-vm object instances --class='Controller' --limit=50
-```
-
-类只有一个存活实例时，可以直接读取对象或嵌套字段：
-
-```bash
-dart-vm object get --class='CacheManager'
-dart-vm object get \
+dart-vm object find --class='CacheManager'
+dart-vm object find \
   --class='CacheManager' \
   --path='_client._status._name'
 ```
 
-类存在多个实例时，先用 `object instances` 获取对象 ID，再指定目标：
+可以用 `--where` 按存储字段筛选。值支持未加引号的字符串或 JSON 标量；重复传入表示
+同时满足多个条件：
 
 ```bash
-dart-vm object get --id='objects/123/0' --path='items[0].id'
+dart-vm object find \
+  --class='Controller' \
+  --where='_state._name=connected' \
+  --where='enabled=true' \
+  --fields='_state._name,enabled'
+```
+
+使用 `--schema` 查看可用于筛选和读取的存储字段：
+
+```bash
+dart-vm object find --class='Controller' --schema
 ```
 
 字段路径支持存储字段、List 下标、JSON 标量 Map key 和 Record 位置字段：
@@ -302,10 +337,22 @@ items[0].id
 settings["endpoint"]
 ```
 
-对象检查不会调用 getter、方法或任意 Dart 表达式。默认只返回浅层对象；`object get
---limit` 控制最终 List、Set 或 Map 最多返回多少项。VM 返回的实例顺序不稳定，不应依赖
-`object instances` 的数组位置。对象 ID 也是临时 VM 句柄，可能在 GC、Hot Restart 或 App
-重启后失效；发生失效时重新运行 `object instances` 获取当前 ID。
+对象检查不会调用 getter、方法或任意 Dart 表达式。
+
+从 List、Set 或 Map 中批量提取字段：
+
+```bash
+dart-vm object find \
+  --class='Controller' \
+  --path='messages' \
+  --fields='text,imMessage.messageId,imMessage.imMessageId' \
+  --row-limit=200
+```
+
+`--row-limit` 是每个匹配对象的严格返回上限。集合读取从 32 条一页开始；仅临时对象 ID
+失效时才会重新定位对象，并依次降为 16、8、4 条重试同一页。`--verbose` 的
+`diagnostics` 会报告 `expiredCount`、`retryCount` 和 `collectedCount`。Map 行额外返回
+`key`；字段缺失或父值为空时对应字段为 `null`。
 
 ## 调用 VM Service extension
 
