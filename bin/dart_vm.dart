@@ -5,7 +5,7 @@ import 'package:args/command_runner.dart';
 import 'package:dart_vm/dart_vm.dart';
 import 'package:vm_service/vm_service.dart' show ClassRef, ObjRef, SentinelKind;
 
-const version = '0.4.0';
+const version = '0.4.1';
 
 void _writeJson(Object? value) {
   stdout.writeln(const JsonEncoder.withIndent('  ').convert(value));

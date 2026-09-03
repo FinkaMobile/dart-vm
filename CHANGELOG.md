@@ -1,3 +1,7 @@
+## 0.4.1 - 2026-09-03
+
+- Add collection-aware object path diagnostics with the direct collection path or keyed entry syntax.
+
 ## 0.4.0 - 2026-09-03
 
 - Add `dart-vm object find` for stored-field filtering, value inspection, schema discovery, and bounded List, Set, and Map extraction.

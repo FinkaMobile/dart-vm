@@ -1,6 +1,6 @@
 name: dart_vm
 description: Inspect network activity, runtime objects, and Flutter UI data through the Dart VM Service.
-version: 0.4.0
+version: 0.4.1
 repository: https://github.com/kuopenx/dart-vm
 
 environment:

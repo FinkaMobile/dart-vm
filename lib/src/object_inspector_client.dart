@@ -118,6 +118,20 @@ typedef ObjectRowsPageReader =
 
 typedef ObjectRowsTargetRefresher = Future<bool> Function();
 
+ObjectInspectionException collectionFieldPathException({
+  required String path,
+  required String parentPath,
+  required String collectionKind,
+}) {
+  final next = collectionKind == 'Map'
+      ? 'Use --path "$parentPath" with --fields <entry-field>, or select a key with "$parentPath["key"]".'
+      : 'Use --path "$parentPath" directly, or select an entry with "$parentPath[0]".';
+  return ObjectInspectionException(
+    'Path "$path" reached a $collectionKind at "$parentPath"; collections do not have stored fields.',
+    next: next,
+  );
+}
+
 /// Reads collection rows within [rowLimit], rebinding the target only after an
 /// expired temporary VM object ID.
 Future<ObjectRowsResult> readRowsAdaptively({
@@ -676,7 +690,9 @@ class ObjectInspectorClient {
 
   Future<dynamic> readPath(ObjRef root, String path) async {
     dynamic current = root;
-    for (final segment in parseObjectPath(path)) {
+    final segments = parseObjectPath(path);
+    for (var index = 0; index < segments.length; index++) {
+      final segment = segments[index];
       final objectId = current is ObjRef ? current.id : null;
       if (objectId == null || objectId.isEmpty) {
         throw ObjectInspectionException(
@@ -687,7 +703,12 @@ class ObjectInspectorClient {
       }
       final object = await getObject(objectId, count: 100);
       current = switch (segment) {
-        ObjectFieldPathSegment() => _readField(object, segment),
+        ObjectFieldPathSegment() => _readField(
+          object,
+          segment,
+          path: path,
+          parentPath: _formatObjectPath(segments.take(index)),
+        ),
         ObjectBracketPathSegment() => await _readBracket(object, segment),
       };
     }
@@ -754,7 +775,19 @@ class ObjectInspectorClient {
     await _service.dispose();
   }
 
-  dynamic _readField(Obj object, ObjectFieldPathSegment segment) {
+  dynamic _readField(
+    Obj object,
+    ObjectFieldPathSegment segment, {
+    required String path,
+    required String parentPath,
+  }) {
+    if (object is Instance && _isCollectionKind(object.kind)) {
+      throw collectionFieldPathException(
+        path: path,
+        parentPath: parentPath,
+        collectionKind: object.kind ?? 'collection',
+      );
+    }
     if (object is! Instance || object.fields == null) {
       throw ObjectInspectionException(
         'Cannot read field "${segment.name}" from ${describeObjectKind(object)}.',
@@ -927,6 +960,17 @@ class ObjectInspectorClient {
       _ => false,
     };
   }
+}
+
+String _formatObjectPath(Iterable<ObjectPathSegment> segments) {
+  final buffer = StringBuffer();
+  for (final segment in segments) {
+    if (segment is ObjectFieldPathSegment && buffer.isNotEmpty) {
+      buffer.write('.');
+    }
+    buffer.write(segment);
+  }
+  return buffer.toString();
 }
 
 IsolateRef _selectIsolate(List<IsolateRef> isolates, String? selector) {

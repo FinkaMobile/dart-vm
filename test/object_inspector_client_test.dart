@@ -195,6 +195,34 @@ void main() {
     );
   });
 
+  test('suggests the direct path when a field follows a collection', () {
+    final error = collectionFieldPathException(
+      path: '_conversations._value',
+      parentPath: '_conversations',
+      collectionKind: 'List',
+    );
+
+    expect(error.message, contains('reached a List at "_conversations"'));
+    expect(
+      error.next,
+      'Use --path "_conversations" directly, or select an entry with "_conversations[0]".',
+    );
+  });
+
+  test('suggests Map entry extraction when a field follows a Map', () {
+    final error = collectionFieldPathException(
+      path: 'settings._value',
+      parentPath: 'settings',
+      collectionKind: 'Map',
+    );
+
+    expect(error.message, contains('reached a Map at "settings"'));
+    expect(
+      error.next,
+      'Use --path "settings" with --fields <entry-field>, or select a key with "settings["key"]".',
+    );
+  });
+
   group('readRowsAdaptively', () {
     ObjectRowsResult page(int offset, int limit, {required int totalCount}) {
       return ObjectRowsResult(
