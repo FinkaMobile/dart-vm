@@ -88,7 +88,10 @@ void main() {
     ]);
 
     expect(result.exitCode, 0);
-    expect(result.stdout, allOf(contains('classes'), contains('find')));
+    expect(
+      result.stdout,
+      allOf(contains('classes'), contains('find'), contains('evaluate')),
+    );
     expect(
       result.stdout,
       allOf(
@@ -98,6 +101,39 @@ void main() {
         isNot(contains('\n  rows')),
       ),
     );
+  });
+
+  test('describes expression options and effects in help', () async {
+    expect(
+      await help(['object', 'evaluate']),
+      allOf(
+        contains('--class=<class-name>'),
+        contains('--expression=<dart-code>'),
+        contains('--where=<path=value>'),
+        contains('--library=<uri-fragment>'),
+        contains('--isolate=<isolate>'),
+        contains('can change App state'),
+        contains('may cause side effects'),
+      ),
+    );
+  });
+
+  test('validates evaluation arguments before connecting', () async {
+    for (final (arguments, message) in [
+      (['--expression=  '], '--expression must not be empty'),
+      (['--expression=count', '--where=invalid'], 'Invalid --where'),
+    ]) {
+      final result = await Process.run(Platform.resolvedExecutable, [
+        'run',
+        'bin/dart_vm.dart',
+        'object',
+        'evaluate',
+        '--class=Counter',
+        ...arguments,
+      ]);
+      expect(result.exitCode, 64);
+      expect(result.stderr, contains(message));
+    }
   });
 
   test(

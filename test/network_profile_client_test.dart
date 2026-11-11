@@ -7,11 +7,19 @@ void main() {
     test('converts HTTP(S) URIs to WebSocket URIs', () {
       expect(
         normalizeVmServiceUri('http://127.0.0.1:8181/token/'),
-        'ws://127.0.0.1:8181/token/',
+        'ws://127.0.0.1:8181/token/ws',
       );
       expect(
         normalizeVmServiceUri('https://example.test/token/'),
-        'wss://example.test/token/',
+        'wss://example.test/token/ws',
+      );
+      expect(
+        normalizeVmServiceUri('http://127.0.0.1:8181'),
+        'ws://127.0.0.1:8181/ws',
+      );
+      expect(
+        normalizeVmServiceUri('https://example.test/token/ws?query=1'),
+        'wss://example.test/token/ws?query=1',
       );
     });
 

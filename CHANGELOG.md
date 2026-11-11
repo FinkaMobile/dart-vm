@@ -1,3 +1,10 @@
+## 0.5.0 - 2026-11-11
+
+- Add `dart-vm object evaluate` to execute Dart expressions on a uniquely matched instance.
+- Report expression compilation errors, runtime exceptions, and uncertain outcomes after a connection loss.
+- Convert HTTP VM Service URIs to the corresponding WebSocket endpoint.
+- Use VM Service ID zones to keep object references available during inspection.
+
 ## 0.4.1 - 2026-09-03
 
 - Add collection-aware object path diagnostics with the direct collection path or keyed entry syntax.

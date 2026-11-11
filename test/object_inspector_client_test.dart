@@ -75,6 +75,32 @@ void main() {
     });
   });
 
+  test('requires a complete candidate scan even when one instance matched', () {
+    final match = ObjectFindMatch(
+      instance: InstanceRef(id: 'objects/1/1'),
+      values: const {},
+      identityHashCode: null,
+    );
+    ObjectFindResult found({required bool scanComplete}) => ObjectFindResult(
+      totalCount: 2,
+      scannedCount: scanComplete ? 2 : 1,
+      matches: [match],
+      expiredCount: 0,
+      collectedCount: 0,
+      retryCount: 0,
+      scanComplete: scanComplete,
+    );
+
+    expect(
+      found(scanComplete: true).requireUniqueMatch('Counter'),
+      same(match),
+    );
+    expect(
+      () => found(scanComplete: false).requireUniqueMatch('Counter'),
+      throwsA(isA<ObjectInspectionException>()),
+    );
+  });
+
   test('describes classes with the library needed for disambiguation', () {
     final classRef = ClassRef(
       id: 'classes/1',

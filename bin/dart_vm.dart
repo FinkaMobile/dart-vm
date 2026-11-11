@@ -5,7 +5,7 @@ import 'package:args/command_runner.dart';
 import 'package:dart_vm/dart_vm.dart';
 import 'package:vm_service/vm_service.dart' show ClassRef, ObjRef, SentinelKind;
 
-const version = '0.4.1';
+const version = '0.5.0';
 
 void _writeJson(Object? value) {
   stdout.writeln(const JsonEncoder.withIndent('  ').convert(value));
@@ -326,25 +326,26 @@ class ObjectCommand extends Command<void> {
   ObjectCommand() {
     addSubcommand(ObjectClassesCommand());
     addSubcommand(ObjectFindCommand());
+    addSubcommand(ObjectEvaluateCommand());
   }
 
   @override
   final name = 'object';
 
   @override
-  final description =
-      'Find loaded Dart classes and inspect live objects without evaluating code.';
+  final description = 'Inspect live objects and evaluate Dart expressions.';
 
   @override
   String get usageFooter => r'''
-Object inspection is read-only and defaults to the main isolate. Start with a
-class name, then use stored-field paths to locate and inspect live objects.
+Object commands default to the main isolate. Use find to read stored fields
+and evaluate to execute code on a uniquely matched instance.
 
 Examples:
   dart-vm object classes --name CacheManager
   dart-vm object find --class ChatViewModel --where '_userId=user-1' --fields '_conversationId,messages._value.length'
   dart-vm object find --class ChatViewModel --schema
   dart-vm object find --class ChatViewModel --where '_userId=user-1' --path 'messages._value' --fields 'text,id'
+  dart-vm object evaluate --class DebugCounter --expression 'count = 7'
 ''';
 
   @override
@@ -353,6 +354,25 @@ Examples:
 }
 
 abstract class ObjectVmCommand extends VmCommand {
+  void addClassOption() {
+    argParser.addOption(
+      'class',
+      valueHelp: 'class-name',
+      help: 'Exact, case-sensitive class name.',
+      mandatory: true,
+    );
+  }
+
+  void addWhereOption() {
+    argParser.addMultiOption(
+      'where',
+      valueHelp: 'path=value',
+      splitCommas: false,
+      help:
+          'Filter candidates by stored scalar paths. Repeat for AND conditions.',
+    );
+  }
+
   void addIsolateOption() {
     argParser.addOption(
       'isolate',
@@ -381,6 +401,25 @@ abstract class ObjectVmCommand extends VmCommand {
   }
 
   String? get isolate => argResults!['isolate'] as String?;
+
+  String get className {
+    final value = argResults!.option('class')!;
+    if (value.isEmpty) {
+      throw UsageException('--class must not be empty.', usage);
+    }
+    return value;
+  }
+
+  List<ObjectWhereClause> readWhere() {
+    try {
+      return argResults!
+          .multiOption('where')
+          .map(parseObjectWhereClause)
+          .toList();
+    } on FormatException catch (error) {
+      throw UsageException('Invalid --where: ${error.message}', usage);
+    }
+  }
 
   String? get library {
     final value = argResults!['library'] as String?;
@@ -448,26 +487,68 @@ Examples:
   }
 }
 
+class ObjectEvaluateCommand extends ObjectVmCommand {
+  ObjectEvaluateCommand() {
+    addClassOption();
+    addWhereOption();
+    addLibraryOption();
+    addIsolateOption();
+    argParser.addOption(
+      'expression',
+      valueHelp: 'dart-code',
+      help: 'Dart expression evaluated in the context of the matched instance.',
+      mandatory: true,
+    );
+  }
+
+  @override
+  final name = 'evaluate';
+
+  @override
+  final description =
+      'Execute a Dart expression on one live instance. This can change App state.';
+
+  @override
+  String get usageFooter => r'''
+The expression runs in the selected isolate and may cause side effects.
+
+Exactly one instance must match. Use --where to narrow the selection.
+
+Example:
+  dart-vm object evaluate --class DebugCounter --expression 'count = 7'
+''';
+
+  @override
+  Future<void> run() async {
+    final targetClass = className;
+    final expression = argResults!.option('expression')!;
+    if (expression.trim().isEmpty) {
+      throw UsageException('--expression must not be empty.', usage);
+    }
+    final where = readWhere();
+    await withObjectInspector(isolate, (client) async {
+      final classRef = await client.requireClass(targetClass, library: library);
+      final result = await client.evaluate(classRef, expression, where: where);
+      printJson({
+        'isolate': {'id': client.isolateId, 'name': client.isolateName},
+        'class': describeClass(classRef),
+        if (where.isNotEmpty)
+          'where': where.map((clause) => clause.toJson()).toList(),
+        'result': describeReference(result),
+      });
+    });
+  }
+}
+
 class ObjectFindCommand extends ObjectVmCommand {
   ObjectFindCommand() {
+    addClassOption();
+    addWhereOption();
     argParser
-      ..addOption(
-        'class',
-        valueHelp: 'class-name',
-        help: 'Exact, case-sensitive class name.',
-        mandatory: true,
-      )
       ..addFlag(
         'schema',
         negatable: false,
         help: 'List stored instance fields available for --where and --fields.',
-      )
-      ..addMultiOption(
-        'where',
-        valueHelp: 'path=value',
-        splitCommas: false,
-        help:
-            'Filter candidates by stored scalar paths. Repeat for AND conditions.',
       )
       ..addOption(
         'path',
@@ -547,22 +628,12 @@ Examples:
 
   @override
   Future<void> run() async {
-    final className = argResults!['class'] as String;
-    if (className.isEmpty) {
-      throw UsageException('--class must not be empty.', usage);
-    }
+    final targetClass = className;
     final schema = argResults!['schema'] as bool;
     final matchLimit = positiveIntOption('match-limit');
     final rowLimit = positiveIntOption('row-limit');
     final path = argResults!['path'] as String?;
-    final where = <ObjectWhereClause>[];
-    for (final source in argResults!['where'] as List<String>) {
-      try {
-        where.add(parseObjectWhereClause(source));
-      } on FormatException catch (error) {
-        throw UsageException('Invalid --where: ${error.message}', usage);
-      }
-    }
+    final where = readWhere();
 
     final rawFields = argResults!['fields'] as String?;
     final fields = <String>[];
@@ -605,7 +676,7 @@ Examples:
     }
 
     await withObjectInspector(isolate, (client) async {
-      final classRef = await client.requireClass(className, library: library);
+      final classRef = await client.requireClass(targetClass, library: library);
       if (schema) {
         final result = await client.classSchema(classRef);
         printJson({

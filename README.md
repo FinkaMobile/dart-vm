@@ -1,8 +1,10 @@
 # dart-vm
 
 `dart-vm` 是一个本地调试命令行工具，用于通过 Dart VM Service 查看运行中
-Dart / Flutter App 的信息。当前提供运行会话发现、网络采集、运行时对象检查、Flutter
-UI Inspector 和通用 VM Service extension 调用能力；它不会发起、重放或修改业务请求。
+Dart / Flutter App 的信息。它支持发现运行会话、查看网络采集数据、检查运行时对象、
+执行 Dart 表达式、查看 Flutter UI，以及调用 VM Service extension。
+
+后续能力规划见 [Roadmap](ROADMAP.md)。
 
 ## 它解决什么问题
 
@@ -10,7 +12,7 @@ Dart VM Service 提供的是底层 RPC。直接检查一个嵌套对象字段时
 isolate、搜索 class、枚举实例、追踪每一级临时 object ID，并从体积很大的协议响应中提取
 目标值。这个过程对人工操作繁琐，也很容易把大量无关数据送进 Agent 或模型上下文。
 
-`dart-vm` 把这些协议步骤封装成稳定、只读的命令，并只输出完成诊断所需的结构化结果。
+`dart-vm object find` 把这些协议步骤封装成只读查询，并只输出完成诊断所需的结构化结果。
 
 ### 一个字段查询：1 条命令与 8 次 RPC
 
@@ -353,6 +355,25 @@ dart-vm object find \
 失效时才会重新定位对象，并依次降为 16、8、4 条重试同一页。`--verbose` 的
 `diagnostics` 会报告 `expiredCount`、`retryCount` 和 `collectedCount`。Map 行额外返回
 `key`；字段缺失或父值为空时对应字段为 `null`。
+
+## 运行时表达式
+
+在本地 Debug App 中，`object evaluate` 可以读取 getter、调用方法或通过赋值修改内存状态。
+Flutter App 请通过 `flutter run` 或 IDE 的 Debug 模式启动，以便 VM Service 编译表达式。
+下面假设 App 有一个标识为 `preview` 的 `DebugCounter`：
+
+```bash
+dart-vm object evaluate \
+  --class DebugCounter \
+  --where 'id=preview' \
+  --expression 'count = 7'
+```
+
+`--isolate`、`--library` 和 `--where` 的语义与 `object find` 相同。CLI 只在确认恰好一个
+实例匹配时执行表达式，并以 JSON 返回 isolate、类、筛选条件和结果摘要。
+
+表达式可能触发目标代码的副作用，包括网络请求。运行异常或连接中断时，
+表达式可能已经修改状态；先用 `object find` 检查实际状态，再决定是否重新执行。
 
 ## 调用 VM Service extension
 

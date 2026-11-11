@@ -53,6 +53,16 @@ dart-vm object find \
 
 集合页默认 32 条；仅临时 VM ID 过期时才重定位同一对象，并以 16、8、4 条重试同一页。普通查询无需额外操作。
 
+## 4. 执行表达式
+
+在本地 Debug App 中使用 `object evaluate`。先按类和存储字段筛选唯一实例，再在实例上下文中执行表达式：
+
+```bash
+dart-vm object evaluate --class DebugCounter --where 'id=preview' --expression 'count = 7'
+```
+
+表达式可能触发目标代码的副作用，包括网络请求。运行异常或断线后先用 `object find` 确认状态，再决定是否重新执行。
+
 ## 诊断
 
 - 默认结果紧凑；仅在排查问题时加 `--verbose`，查看 `expiredCount`、`retryCount`、`collectedCount`。

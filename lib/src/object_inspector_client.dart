@@ -66,6 +66,7 @@ class ObjectFindResult {
     required this.expiredCount,
     required this.collectedCount,
     required this.retryCount,
+    this.scanComplete = false,
   });
 
   final int totalCount;
@@ -74,6 +75,31 @@ class ObjectFindResult {
   final int expiredCount;
   final int collectedCount;
   final int retryCount;
+  final bool scanComplete;
+
+  ObjectFindMatch requireUniqueMatch(String className) {
+    if (matches.length > 1) {
+      throw ObjectInspectionException(
+        'Multiple live instances of "$className" matched.',
+        next: 'Narrow the selection with --where <path=value>.',
+      );
+    }
+    if (!scanComplete) {
+      throw ObjectInspectionException(
+        'Could not confirm a unique live instance of "$className".',
+        next:
+            'Check the target with object find or narrow the selection with --where.',
+      );
+    }
+    if (matches.isEmpty) {
+      throw ObjectInspectionException(
+        'No live instance of "$className" matched.',
+        next:
+            'Open the target page or check the --where filters with object find.',
+      );
+    }
+    return matches.single;
+  }
 }
 
 class ObjectSchemaField {
@@ -369,8 +395,8 @@ class ObjectInspectorClient {
       try {
         idZoneId = (await service.createIdZone(
           id,
-          'ring',
-          'reuseExisting',
+          IdZoneBackingBufferKind.kRing,
+          IdAssignmentPolicy.kReuseExisting,
           capacity: 16384,
         )).id;
       } on RPCError {
@@ -485,6 +511,7 @@ class ObjectInspectorClient {
     late int totalCount;
     late int scannedCount;
     late List<ObjectFindMatch> matches;
+    var scanComplete = false;
 
     for (var attempt = 0; attempt < 2; attempt++) {
       var result = await instances(
@@ -553,6 +580,10 @@ class ObjectInspectorClient {
       totalCount = result.totalCount ?? totalCount;
       scannedCount = attemptScanned;
       matches = attemptMatches;
+      scanComplete =
+          attemptExpired == 0 &&
+          result.totalCount != null &&
+          attemptScanned == result.totalCount;
       if (attemptExpired == 0) break;
       retryCount++;
     }
@@ -564,7 +595,66 @@ class ObjectInspectorClient {
       expiredCount: expiredCount,
       collectedCount: collectedCount,
       retryCount: retryCount,
+      scanComplete: scanComplete,
     );
+  }
+
+  Future<InstanceRef> evaluate(
+    ClassRef classRef,
+    String expression, {
+    required List<ObjectWhereClause> where,
+  }) async {
+    final result = await findInstances(
+      classRef,
+      where: where,
+      fields: const [],
+      limit: 2,
+    );
+    final match = result.requireUniqueMatch(classRef.name ?? '<unknown>');
+    final Response response;
+    try {
+      response = await _service.evaluate(
+        isolateId,
+        match.instance.id!,
+        expression,
+        idZoneId: _idZoneId,
+      );
+    } on SentinelException catch (error) {
+      throw ObjectInspectionException(
+        'Evaluation target is unavailable: ${error.sentinel.kind}.',
+        next: 'Check the target with object find.',
+      );
+    } on RPCError catch (error) {
+      final kind = RPCErrorKind.fromCode(error.code);
+      if (kind == RPCErrorKind.kConnectionDisposed ||
+          (kind == RPCErrorKind.kServerError &&
+              error.message == 'Service connection disposed')) {
+        throw ObjectInspectionException(
+          'VM Service disconnected during evaluation. The execution outcome is unknown.',
+          next: 'Check the App state before evaluating again.',
+        );
+      }
+      final message = switch (kind) {
+        RPCErrorKind.kExpressionCompilationError =>
+          'Expression compilation failed',
+        RPCErrorKind.kMethodNotFound || RPCErrorKind.kFeatureDisabled =>
+          'Expression evaluation is unavailable in this VM',
+        _ => 'Expression evaluation failed',
+      };
+      throw ObjectInspectionException('$message: ${_rpcMessage(error)}.');
+    }
+
+    return switch (response) {
+      InstanceRef() => response,
+      ErrorRef() => throw ObjectInspectionException(
+        'Expression threw: ${response.message ?? response.kind ?? 'unknown runtime error'}',
+        next: 'Check the App state before evaluating again.',
+      ),
+      _ => throw ObjectInspectionException(
+        'Unexpected evaluation response: ${response.type}.',
+        next: 'Check the App state before evaluating again.',
+      ),
+    };
   }
 
   Future<List<ObjectSchemaField>> classSchema(ClassRef classRef) async {
