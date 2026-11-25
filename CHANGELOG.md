@@ -4,6 +4,7 @@
 - Run interactive or scripted JSON Lines steps with `object session`. Save a result with `as`, select it with `ref`, and pass it into later expressions with `scope`.
 - Wait for asynchronous results with `--await` or a session step's `await` option. A timeout ends the CLI wait. The target operation can still complete.
 - Capture a value and its undo expression, then explicitly restore it on the original target within the same session.
+- Extract Windows self-updates through .NET when running the CLI from PowerShell.
 
 ## 0.5.0 - 2026-11-11
 

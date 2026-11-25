@@ -131,8 +131,10 @@ class ReleaseUpdater {
         '-NoProfile',
         '-NonInteractive',
         '-Command',
-        'Expand-Archive -LiteralPath $archivePath '
-            '-DestinationPath $destinationPath -Force',
+        r"$ErrorActionPreference = 'Stop'; "
+            'Add-Type -AssemblyName System.IO.Compression.FileSystem; '
+            '[System.IO.Compression.ZipFile]::ExtractToDirectory('
+            '$archivePath, $destinationPath)',
       ]);
     } else {
       result = await Process.run('unzip', [
