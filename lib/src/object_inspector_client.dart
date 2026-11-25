@@ -6,9 +6,16 @@ import 'package:vm_service/vm_service_io.dart';
 import 'vm_service_uri.dart';
 
 class ObjectInspectionException implements Exception {
-  ObjectInspectionException(this.message, {this.next});
+  ObjectInspectionException(
+    this.message, {
+    this.next,
+    this.code = 'inspection',
+    this.dartStack,
+  });
 
   final String message;
+  final String code;
+  final String? dartStack;
   final String? next;
 
   @override
@@ -599,29 +606,56 @@ class ObjectInspectorClient {
     );
   }
 
+  Future<LibraryRef> requireLibrary(String uri) async {
+    final isolate = await _service.getIsolate(isolateId);
+    final matches =
+        isolate.libraries?.where((lib) => lib.uri == uri).toList() ?? [];
+    if (matches.length != 1) {
+      throw ObjectInspectionException(
+        'Expected one loaded library with URI "$uri", found ${matches.length}.',
+      );
+    }
+    return matches.single;
+  }
+
   Future<InstanceRef> evaluate(
     ClassRef classRef,
     String expression, {
     required List<ObjectWhereClause> where,
-  }) async {
+  }) async =>
+      evaluateOn((await uniqueInstance(classRef, where)).id!, expression);
+
+  Future<ObjRef> uniqueInstance(
+    ClassRef classRef,
+    List<ObjectWhereClause> where,
+  ) async {
     final result = await findInstances(
       classRef,
       where: where,
       fields: const [],
       limit: 2,
     );
-    final match = result.requireUniqueMatch(classRef.name ?? '<unknown>');
+    return result.requireUniqueMatch(classRef.name ?? '<unknown>').instance;
+  }
+
+  Future<InstanceRef> evaluateOn(
+    String targetId,
+    String expression, {
+    Map<String, String>? scope,
+  }) async {
     final Response response;
     try {
       response = await _service.evaluate(
         isolateId,
-        match.instance.id!,
+        targetId,
         expression,
+        scope: scope,
         idZoneId: _idZoneId,
       );
     } on SentinelException catch (error) {
       throw ObjectInspectionException(
         'Evaluation target is unavailable: ${error.sentinel.kind}.',
+        code: 'unavailable',
         next: 'Check the target with object find.',
       );
     } on RPCError catch (error) {
@@ -631,6 +665,7 @@ class ObjectInspectorClient {
               error.message == 'Service connection disposed')) {
         throw ObjectInspectionException(
           'VM Service disconnected during evaluation. The execution outcome is unknown.',
+          code: 'disconnected',
           next: 'Check the App state before evaluating again.',
         );
       }
@@ -641,13 +676,19 @@ class ObjectInspectorClient {
           'Expression evaluation is unavailable in this VM',
         _ => 'Expression evaluation failed',
       };
-      throw ObjectInspectionException('$message: ${_rpcMessage(error)}.');
+      throw ObjectInspectionException(
+        '$message: ${_rpcMessage(error)}.',
+        code: kind == RPCErrorKind.kExpressionCompilationError
+            ? 'compile'
+            : 'rpc',
+      );
     }
 
     return switch (response) {
       InstanceRef() => response,
       ErrorRef() => throw ObjectInspectionException(
         'Expression threw: ${response.message ?? response.kind ?? 'unknown runtime error'}',
+        code: 'exception',
         next: 'Check the App state before evaluating again.',
       ),
       _ => throw ObjectInspectionException(

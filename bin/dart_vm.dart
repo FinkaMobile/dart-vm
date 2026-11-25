@@ -5,7 +5,7 @@ import 'package:args/command_runner.dart';
 import 'package:dart_vm/dart_vm.dart';
 import 'package:vm_service/vm_service.dart' show ClassRef, ObjRef, SentinelKind;
 
-const version = '0.5.0';
+const version = '0.6.0';
 
 void _writeJson(Object? value) {
   stdout.writeln(const JsonEncoder.withIndent('  ').convert(value));
@@ -327,6 +327,7 @@ class ObjectCommand extends Command<void> {
     addSubcommand(ObjectClassesCommand());
     addSubcommand(ObjectFindCommand());
     addSubcommand(ObjectEvaluateCommand());
+    addSubcommand(ObjectSessionCommand());
   }
 
   @override
@@ -338,7 +339,8 @@ class ObjectCommand extends Command<void> {
   @override
   String get usageFooter => r'''
 Object commands default to the main isolate. Use find to read stored fields
-and evaluate to execute code on a uniquely matched instance.
+and evaluate to execute code in an instance, class or library. Use session to
+share results between expressions.
 
 Examples:
   dart-vm object classes --name CacheManager
@@ -354,12 +356,12 @@ Examples:
 }
 
 abstract class ObjectVmCommand extends VmCommand {
-  void addClassOption() {
+  void addClassOption({bool mandatory = true}) {
     argParser.addOption(
       'class',
       valueHelp: 'class-name',
       help: 'Exact, case-sensitive class name.',
-      mandatory: true,
+      mandatory: mandatory,
     );
   }
 
@@ -489,53 +491,181 @@ Examples:
 
 class ObjectEvaluateCommand extends ObjectVmCommand {
   ObjectEvaluateCommand() {
-    addClassOption();
+    addClassOption(mandatory: false);
     addWhereOption();
     addLibraryOption();
     addIsolateOption();
-    argParser.addOption(
-      'expression',
-      valueHelp: 'dart-code',
-      help: 'Dart expression evaluated in the context of the matched instance.',
-      mandatory: true,
-    );
+    argParser
+      ..addOption(
+        'static-class',
+        valueHelp: 'class-name',
+        help: 'Evaluate in a class context.',
+      )
+      ..addOption(
+        'library-uri',
+        valueHelp: 'uri',
+        help: 'Evaluate in a library by exact loaded URI.',
+      )
+      ..addOption(
+        'expression',
+        valueHelp: 'dart-code',
+        help: 'Dart expression to execute.',
+        mandatory: true,
+      )
+      ..addFlag(
+        'await',
+        negatable: false,
+        help: 'Wait for the returned Future or synchronous value.',
+      )
+      ..addOption(
+        'timeout-ms',
+        valueHelp: 'ms',
+        help: 'Wait limit with --await (default 5000 ms).',
+      )
+      ..addMultiOption(
+        'fields',
+        valueHelp: 'path',
+        splitCommas: false,
+        help: 'Return a stored result path. Repeat for more fields.',
+      );
   }
 
   @override
   final name = 'evaluate';
 
   @override
-  final description =
-      'Execute a Dart expression on one live instance. This can change App state.';
+  final description = 'Execute a Dart expression. This can change App state.';
 
   @override
   String get usageFooter => r'''
 The expression runs in the selected isolate and may cause side effects.
+Choose one of --class (one matching instance), --static-class, or --library-uri.
 
-Exactly one instance must match. Use --where to narrow the selection.
-
-Example:
+Examples:
   dart-vm object evaluate --class DebugCounter --expression 'count = 7'
+  dart-vm object evaluate --static-class DebugCounter --expression 'create()' --fields count
 ''';
 
   @override
   Future<void> run() async {
-    final targetClass = className;
-    final expression = argResults!.option('expression')!;
+    final args = argResults!;
+    final expression = args.option('expression')!;
     if (expression.trim().isEmpty) {
       throw UsageException('--expression must not be empty.', usage);
     }
-    final where = readWhere();
+    final SessionStep step;
+    try {
+      step = SessionStep.parse(<String, dynamic>{
+        for (final (flag, key) in [
+          ('class', 'class'),
+          ('static-class', 'staticClass'),
+          ('library-uri', 'libraryUri'),
+          ('library', 'library'),
+        ])
+          if (args.wasParsed(flag)) key: args.option(flag),
+        if (args.wasParsed('where')) 'where': args.multiOption('where'),
+        'expression': expression,
+        'await': args.flag('await'),
+        if (args.wasParsed('timeout-ms'))
+          'timeoutMs': positiveIntOption('timeout-ms'),
+        'fields': args.multiOption('fields'),
+      });
+    } on FormatException catch (error) {
+      throw UsageException(error.message, usage);
+    }
     await withObjectInspector(isolate, (client) async {
-      final classRef = await client.requireClass(targetClass, library: library);
-      final result = await client.evaluate(classRef, expression, where: where);
       printJson({
         'isolate': {'id': client.isolateId, 'name': client.isolateName},
-        'class': describeClass(classRef),
-        if (where.isNotEmpty)
-          'where': where.map((clause) => clause.toJson()).toList(),
-        'result': describeReference(result),
+        ...await ObjectSession(client).run(step),
       });
+    });
+  }
+}
+
+class ObjectSessionCommand extends ObjectVmCommand {
+  ObjectSessionCommand() {
+    addIsolateOption();
+    argParser.addOption(
+      'file',
+      valueHelp: 'steps.jsonl',
+      help: 'Read one JSON step per line. Defaults to stdin.',
+    );
+  }
+
+  @override
+  final name = 'session';
+
+  @override
+  final description =
+      'Execute steps in one VM connection. Expressions and explicit restore steps can change App state.';
+
+  @override
+  String get usageFooter => r'''
+Each non-empty line is one step. Use class, staticClass, libraryUri or ref to
+select its target. Save a result with as; scope maps expression names to saved
+results. Add undo to capture a snapshot and use restore to apply it. End with EOF.
+Output is JSON Lines. A failed batch stops; a terminal accepts another step.
+
+  {"class":"DebugCounter","expression":"count","as":"old","undo":"count = previous"}
+  {"staticClass":"DebugCounter","expression":"create()","as":"counter"}
+  {"ref":"counter","scope":{"value":"old"},"expression":"count = value"}
+  {"restore":"old"}
+''';
+
+  @override
+  Future<void> run() async {
+    final file = argResults!.option('file');
+    final terminal = file == null && stdin.hasTerminal;
+    final lines = (file == null ? stdin : File(file).openRead())
+        .transform(utf8.decoder)
+        .transform(const LineSplitter());
+    await withObjectInspector(isolate, (client) async {
+      final session = ObjectSession(client);
+      var lineNumber = 0;
+      if (terminal) {
+        stderr.writeln('Enter one JSON step per line. EOF ends the session.');
+      }
+      await for (final line in lines) {
+        lineNumber++;
+        if (line.trim().isEmpty) continue;
+        try {
+          final step = SessionStep.parse(jsonDecode(line));
+          final result = await session.run(step);
+          stdout.writeln(jsonEncode({'line': lineNumber, ...result}));
+        } on Exception catch (error) {
+          final invalid = error is FormatException;
+          stderr.writeln(
+            jsonEncode({
+              'line': lineNumber,
+              'error': {
+                'code': error is ObjectInspectionException
+                    ? error.code
+                    : invalid
+                    ? 'input'
+                    : 'vm',
+                'message': error is FormatException
+                    ? error.message
+                    : error.toString(),
+                if (error is ObjectInspectionException &&
+                    error.dartStack != null)
+                  'stack': error.dartStack,
+              },
+              if (session.pendingSnapshots.isNotEmpty)
+                'pendingSnapshots': session.pendingSnapshots.toList(),
+            }),
+          );
+          exitCode = invalid ? 64 : 1;
+          if (!terminal) return;
+        }
+      }
+      if (session.pendingSnapshots.isNotEmpty) {
+        stderr.writeln(
+          jsonEncode({
+            'pendingSnapshots': session.pendingSnapshots.toList(),
+            'message': 'Session ended with unrestored snapshots.',
+          }),
+        );
+      }
     });
   }
 }

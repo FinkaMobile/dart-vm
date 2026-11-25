@@ -55,13 +55,30 @@ dart-vm object find \
 
 ## 4. 执行表达式
 
-在本地 Debug App 中使用 `object evaluate`。先按类和存储字段筛选唯一实例，再在实例上下文中执行表达式：
+在本地 Debug App 中使用 `object evaluate`。使用 `--class` 和 `--where` 选择唯一实例；用 `--static-class` 访问静态成员，或用 `--library-uri` 精确选择已加载的库。
 
 ```bash
 dart-vm object evaluate --class DebugCounter --where 'id=preview' --expression 'count = 7'
+dart-vm object evaluate --static-class DebugCounter --expression 'create()' --fields count
 ```
 
 表达式可能触发目标代码的副作用，包括网络请求。运行异常或断线后先用 `object find` 确认状态，再决定是否重新执行。
+
+## 5. 多步调试
+
+启动 `dart-vm object session`，依次写入 JSON 行并读取每步结果。测试脚本使用
+`dart-vm object session --file steps.jsonl`。下例捕获计数、跨上下文传值并显式恢复。
+
+```jsonl
+{"class":"DebugCounter","where":["id=preview"],"expression":"count","as":"old","undo":"count = previous"}
+{"staticClass":"DebugCounter","expression":"create()","as":"preview"}
+{"ref":"preview","scope":{"savedCount":"old"},"expression":"count = savedCount"}
+{"restore":"old"}
+```
+
+- 用 `await: true` 获取 Future 的最终值，可用 `timeoutMs` 设置等待上限。超时后先检查实际状态。
+- `fields` 接受存储路径数组。错误按输入行号返回，文件或管道在该步停止。交互终端可继续执行恢复。
+- 保存的变量和快照仅在当前会话可用。恢复可变集合内容时，先复制要还原的数据；在关闭标准输入之前执行恢复。
 
 ## 诊断
 

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -39,6 +40,139 @@ void main() {
       },
     ]);
   });
+
+  test(
+    'session accepts live stdin, reuses bindings and releases its ID zone on EOF',
+    () async {
+      final service = await _EvaluationService.start(
+        evaluationReply: const {
+          'result': {
+            'type': '@Instance',
+            'kind': 'PlainInstance',
+            'id': 'objects/saved',
+          },
+        },
+      );
+      final process = await service.session();
+      final errors = process.stderr.transform(utf8.decoder).join();
+      final output = StreamIterator(
+        process.stdout.transform(utf8.decoder).transform(const LineSplitter()),
+      );
+      addTearDown(output.cancel);
+      process.stdin.writeln(
+        jsonEncode({
+          'staticClass': 'Counter',
+          'expression': 'newCounter()',
+          'as': 'obj',
+        }),
+      );
+      expect(await output.moveNext(), isTrue);
+      expect(jsonDecode(output.current)['line'], 1);
+      process.stdin.writeln();
+      process.stdin.writeln(
+        jsonEncode({
+          'ref': 'obj',
+          'expression': 'compare(peer)',
+          'scope': {'peer': 'obj'},
+        }),
+      );
+      expect(await output.moveNext(), isTrue);
+      expect(jsonDecode(output.current)['line'], 3);
+      await process.stdin.close();
+      expect(await output.moveNext(), isFalse);
+      expect(await process.exitCode, 0);
+      expect(await errors, isEmpty);
+      expect(service.evaluations.last, {
+        'isolateId': 'isolates/1',
+        'targetId': 'objects/saved',
+        'expression': 'compare(peer)',
+        'scope': {'peer': 'objects/saved'},
+        'idZoneId': 'zones/1',
+      });
+      expect(service.methods.where((m) => m == 'createIdZone'), hasLength(1));
+      expect(service.methods.last, 'deleteIdZone');
+      expect(service.methods, isNot(contains('getInstances')));
+    },
+  );
+
+  test(
+    'malformed batch stops at the input line and reports pending recovery',
+    () async {
+      final service = await _EvaluationService.start(
+        evaluationReply: const {
+          'result': {
+            'type': '@Instance',
+            'kind': 'Int',
+            'valueAsString': '1',
+            'id': 'objects/old',
+          },
+        },
+      );
+      final process = await service.session();
+      final output = process.stdout.transform(utf8.decoder).join();
+      final errors = process.stderr.transform(utf8.decoder).join();
+      process.stdin.writeln(
+        '{"staticClass":"Counter","expression":"count","as":"old","undo":"count = previous"}',
+      );
+      process.stdin.writeln('bad-json');
+      process.stdin.writeln('{"restore":"old"}');
+      await process.stdin.close();
+      expect(await process.exitCode, 64);
+      expect(jsonDecode(await output)['snapshot'], 'old');
+      final error = jsonDecode(await errors);
+      expect(error['line'], 2);
+      expect(error['error']['code'], 'input');
+      expect(error['pendingSnapshots'], ['old']);
+      expect(service.evaluations, hasLength(1));
+      expect(service.methods.last, 'deleteIdZone');
+    },
+  );
+
+  test(
+    'session reports a lost evaluation without dispatching the next step',
+    () async {
+      final service = await _EvaluationService.start(evaluationReply: null);
+      final process = await service.session();
+      final errors = process.stderr.transform(utf8.decoder).join();
+      process.stdin.writeln(
+        '{"staticClass":"Counter","expression":"increment()"}',
+      );
+      process.stdin.writeln(
+        '{"staticClass":"Counter","expression":"increment()"}',
+      );
+      await process.stdin.close();
+      expect(await process.exitCode, 1);
+      final error = jsonDecode(await errors);
+      expect(error['line'], 1);
+      expect(error['error']['code'], 'disconnected');
+      expect(service.evaluations, hasLength(1));
+    },
+  );
+
+  test(
+    'requires the exact loaded URI and supports top-level evaluation',
+    () async {
+      final service = await _EvaluationService.start();
+      Future<ProcessResult> evaluate(String uri) =>
+          Process.run(Platform.resolvedExecutable, [
+            'run',
+            'bin/dart_vm.dart',
+            '--uri=http://127.0.0.1:${service.port}/',
+            'object',
+            'evaluate',
+            '--library-uri=$uri',
+            '--expression=topLevel()',
+          ]);
+      final missing = await evaluate('fixture/counter');
+      expect(missing.exitCode, 1);
+      expect(missing.stderr, contains('found 0'));
+      expect(service.evaluations, isEmpty);
+      final result = await evaluate('package:fixture/counter.dart');
+      expect(result.exitCode, 0, reason: result.stderr.toString());
+      expect(service.evaluations.single['targetId'], 'libraries/1');
+      expect(service.methods, isNot(contains('getClassList')));
+    },
+  );
 
   for (final (candidates, totalCount, message) in [
     (<int>[], 0, 'No live instance'),
@@ -111,6 +245,7 @@ class _EvaluationService {
   _EvaluationService(this.port);
 
   final int port;
+  final methods = <String>[];
   final evaluations = <Map<String, dynamic>>[];
 
   static Future<_EvaluationService> start({
@@ -129,6 +264,7 @@ class _EvaluationService {
         final call = jsonDecode(message as String) as Map<String, dynamic>;
         final params = call['params'] as Map<String, dynamic>;
         final method = call['method'] as String;
+        service.methods.add(method);
         Map<String, Object?>? reply;
         if (method == 'evaluate') {
           service.evaluations.add(params);
@@ -148,6 +284,13 @@ class _EvaluationService {
             'getIsolate' => {
               'type': 'Isolate',
               'runnable': true,
+              'libraries': [
+                {
+                  'type': '@Library',
+                  'id': 'libraries/1',
+                  'uri': 'package:fixture/counter.dart',
+                },
+              ],
               'name': 'main',
             },
             'createIdZone' => {'type': 'IdZone', 'id': 'zones/1'},
@@ -202,6 +345,18 @@ class _EvaluationService {
       }
     });
     return service;
+  }
+
+  Future<Process> session() async {
+    final process = await Process.start(Platform.resolvedExecutable, [
+      'run',
+      'bin/dart_vm.dart',
+      '--uri=http://127.0.0.1:$port/',
+      'object',
+      'session',
+    ]);
+    addTearDown(process.kill);
+    return process;
   }
 
   Future<ProcessResult> evaluate(

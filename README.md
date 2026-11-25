@@ -183,6 +183,12 @@ dart compile exe bin/dart_vm.dart -o build/dart-vm
 源码构建产物位于 `build/dart-vm`，仅用于本地开发；正式安装使用 GitHub Release
 中的预编译二进制。
 
+在仓库根目录执行完整测试。以下命令也会启动本地 Dart VM，验证表达式求值、跨步骤传值和状态恢复。
+
+```bash
+DART_VM_SMOKE=1 dart test
+```
+
 ## 版本与升级
 
 ```bash
@@ -369,11 +375,36 @@ dart-vm object evaluate \
   --expression 'count = 7'
 ```
 
-`--isolate`、`--library` 和 `--where` 的语义与 `object find` 相同。CLI 只在确认恰好一个
-实例匹配时执行表达式，并以 JSON 返回 isolate、类、筛选条件和结果摘要。
+求值目标三选一。`--class` 和 `--where` 选中唯一实例，`--static-class` 选中类，
+`--library-uri` 精确匹配已加载的 library URI。两种类选择器均支持用 `--library` 片段消除同名类歧义。
 
-表达式可能触发目标代码的副作用，包括网络请求。运行异常或连接中断时，
-表达式可能已经修改状态；先用 `object find` 检查实际状态，再决定是否重新执行。
+```bash
+dart-vm object evaluate --static-class DebugCounter --expression 'create()' --fields count
+dart-vm object evaluate --library-uri 'package:example/preview.dart' --expression 'loadPreview()' --await
+```
+
+`--await` 等待同步值或 Future 完成，也支持表达式中的 `await`。默认等待 5000 毫秒，
+可用 `--timeout-ms` 调整。超时只结束 CLI 的等待，目标操作仍可能完成。用可重复的
+`--fields <path>` 读取结果的存储字段。表达式可修改应用状态或触发网络请求，执行结果不明时先核对状态。
+
+### 跨表达式传递对象和恢复状态
+
+`dart-vm object session` 从标准输入逐行读取 JSON，每收到一步就执行并输出一行 JSON。
+也可用 `dart-vm object session --file steps.jsonl` 执行同格式脚本。所有步骤共享一个
+VM 连接和 isolate，可用 `--isolate` 选定目标。下面示例假设调试应用具有 `Inbox` 和 `Room`。
+
+```jsonl
+{"class":"Inbox","expression":"rooms.toList()","as":"before","undo":"rooms..clear()..addAll(previous)"}
+{"staticClass":"Room","expression":"create()","as":"room","fields":["name"]}
+{"libraryUri":"package:example/inbox.dart","scope":{"preview":"room"},"expression":"inbox.closeRoom(preview)","await":true,"timeoutMs":5000}
+{"ref":"room","expression":"name"}
+{"restore":"before"}
+```
+
+- `as` 保存当前结果；`ref` 将保存的对象用作求值上下文。`scope` 将表达式中的局部名称映射到已保存的结果，传递同一对象。变量和临时对象 ID 的有效范围是当前活跃会话，VM 报告引用失效时需要重新选择对象。
+- 快照由 `as` 和 `undo` 共同声明。`restore` 在原目标和原 scope 上执行恢复表达式，`previous` 绑定捕获的值。恢复成功后释放该名称。恢复异步操作时使用 `{"restore":"before","await":true}`。
+- 快照捕获对象引用。原地修改集合时，捕获表达式应复制要还原的数据，例如 `rooms.toList()` 复制成员顺序；若要修改成员字段，应单独保存相应字段值。
+- 成功步骤向标准输出写入行号和结果；错误向标准错误写入行号、错误码、原因及待恢复的快照名称。文件和管道遇错即停，已执行的步骤保留其效果。交互终端可在错误后继续输入恢复步骤。按 EOF 结束会话，需保留的原状态应在退出前显式恢复。
 
 ## 调用 VM Service extension
 

@@ -90,7 +90,12 @@ void main() {
     expect(result.exitCode, 0);
     expect(
       result.stdout,
-      allOf(contains('classes'), contains('find'), contains('evaluate')),
+      allOf(
+        contains('classes'),
+        contains('find'),
+        contains('evaluate'),
+        contains('session'),
+      ),
     );
     expect(
       result.stdout,
@@ -118,10 +123,27 @@ void main() {
     );
   });
 
+  test('documents session steps, sources and explicit restoration', () async {
+    expect(
+      await help(['object', 'session']),
+      allOf(
+        contains('--file=<steps.jsonl>'),
+        contains('can change App state'),
+        contains('restore'),
+        contains('scope'),
+        contains('stdin'),
+      ),
+    );
+  });
+
   test('validates evaluation arguments before connecting', () async {
     for (final (arguments, message) in [
       (['--expression=  '], '--expression must not be empty'),
       (['--expression=count', '--where=invalid'], 'Invalid --where'),
+      (['--expression=count', '--static-class=Other'], 'exactly one'),
+      (['--expression=count', '--library-uri=dart:core'], 'exactly one'),
+      (['--expression=count', '--timeout-ms=4'], 'requires await'),
+      (['--expression=count', '--fields=x.'], 'must not end'),
     ]) {
       final result = await Process.run(Platform.resolvedExecutable, [
         'run',
